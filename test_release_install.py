@@ -9,7 +9,7 @@ import threading
 import unittest
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import paramiko
 
@@ -123,8 +123,12 @@ class InstallTests(unittest.TestCase):
         self.enterContext(patch.object(sys, "frozen", True, create=True))
         self.enterContext(patch.object(sys, "_MEIPASS", str(self.temp), create=True))
         self.spawn = self.enterContext(patch.object(setup, "_start"))
-        self.verify = self.enterContext(patch.object(setup, "_wait_for_bridge"))
-        self.powershell = self.enterContext(patch.object(setup, "_powershell"))
+        self.verify = self.enterContext(patch.object(setup, "_wait_for_bridge", return_value=True))
+        self.powershell = self.enterContext(patch.object(setup, "_powershell", return_value=""))
+        self.runtime = self.enterContext(patch("pc_bridge.find_vrserver_pid", return_value=123, create=True))
+        self.lifecycle = Mock()
+        self.lifecycle.startup_enabled.return_value = True
+        self.enterContext(patch.dict(sys.modules, steamvr_lifecycle=self.lifecycle))
         self.enterContext(patch.object(setup, "_keygen"))
         self.enterContext(patch.object(setup, "_public_key", return_value=b"fixture public key"))
         self.deploy = self.enterContext(patch.object(setup, "_deploy"))
@@ -147,7 +151,8 @@ class InstallTests(unittest.TestCase):
         original.write_bytes(b"original binding")
         target = self.install()
         self.assertTrue(target.is_file())
-        self.spawn.assert_called_once_with(self.directory, target)
+        self.spawn.assert_called_once_with(self.directory, target, ["--bridge"])
+        self.lifecycle.register.assert_called_once_with(self.directory, target, ["--bridge"])
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual((config["host"], config["username"]), (HOST, USERNAME))
         self.assertTrue(config["instance_id"])
@@ -156,7 +161,7 @@ class InstallTests(unittest.TestCase):
             if file.is_file():
                 self.assertNotIn(PASSWORD.encode(), file.read_bytes())
         self.assertNotIn(PASSWORD, " ".join(self.messages))
-        self.assertEqual(self.powershell.call_args.args[0], setup._REGISTER)
+        self.assertEqual(self.powershell.call_args.args[0], setup._READ_LEGACY)
 
     def test_bridge_failure_restores_prior_config_without_registering_startup(self):
         previous = b'{"host":"old.example","username":"prior","instance_id":"old-id"}\n'
@@ -165,7 +170,45 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "simulated tunnel failure"):
             self.install()
         self.assertEqual(self.config.read_bytes(), previous)
-        self.assertNotIn(setup._REGISTER, [call.args[0] for call in self.powershell.call_args_list])
+        self.lifecycle.register.return_value.assert_called_once_with()
+        self.assertNotIn(setup._READ_LEGACY, [call.args[0] for call in self.powershell.call_args_list])
+
+    def test_runtime_offline_registers_without_starting_or_waiting(self):
+        self.runtime.return_value = None
+        target = self.install()
+        self.lifecycle.register.assert_called_once_with(self.directory, target, ["--bridge"])
+        self.spawn.assert_not_called()
+        self.verify.assert_not_called()
+        self.assertIn("下次启动 SteamVR", self.messages[-1])
+
+    def test_disabled_startup_setting_survives_upgrade_even_if_runtime_is_open(self):
+        self.lifecycle.startup_enabled.return_value = False
+        self.install()
+        self.spawn.assert_not_called()
+        self.verify.assert_not_called()
+        self.assertIn("已保留关闭状态", self.messages[-1])
+
+    def test_runtime_closing_during_verification_commits_for_next_start(self):
+        self.verify.return_value = False
+        self.install()
+        self.assertIn("下次启动 SteamVR", self.messages[-1])
+        self.lifecycle.register.return_value.assert_not_called()
+
+    def test_migrate_only_owned_legacy_shortcuts(self):
+        link = self.temp / "VRChat Gesture Dock.lnk"
+        script = str(self.directory / "pc_bridge.py")
+        valid = self.directory / "program/0123456789abcdef/VRChatGestureDock.exe"
+        for target, arguments, owned in [
+                (valid, "--bridge", True), (valid, "--self-test", False),
+                (self.temp / "VRChatGestureDock.exe", "--bridge", False),
+                (self.temp / "pythonw3.12.exe", '"' + script + '"', True),
+                (self.temp / "pythonw.exe", str(self.temp / "other.py"), False)]:
+            with self.subTest(target=target, arguments=arguments):
+                link.write_bytes(b"disposable test shortcut")
+                self.powershell.return_value = json.dumps({"path": str(link), "target": str(target),
+                                                          "arguments": arguments})
+                setup._remove_legacy(self.directory, valid)
+                self.assertEqual(link.exists(), not owned)
 
     def test_remote_preflight_failure_leaves_prior_installation_alone(self):
         original = b'{"host":"my-own-frame","username":"prior"}'
@@ -177,6 +220,20 @@ class InstallTests(unittest.TestCase):
         self.powershell.assert_not_called()
         self.spawn.assert_not_called()
         self.assertEqual(self.config.read_bytes(), original)
+
+    def test_script_migration_restores_code_before_restarting_legacy_process(self):
+        script = self.directory / "pc_bridge.py"
+        script.write_bytes(b"original")
+        interpreter = self.temp / "pythonw.exe"
+        self.powershell.side_effect = [json.dumps({"executable": str(interpreter), "script": True}), ""]
+        self.lifecycle.register.side_effect = RuntimeError("registration failed")
+        snapshots = []
+        self.spawn.side_effect = lambda *args: snapshots.append(script.read_bytes())
+        with self.assertRaisesRegex(RuntimeError, "registration failed"):
+            setup.configure_startup(self.directory, interpreter, [str(script)],
+                                    updated_files={script: b"new bridge"})
+        self.assertEqual(snapshots, [b"original"])
+        self.spawn.assert_called_once_with(self.directory, interpreter, [str(script)])
 
     def test_invalid_destination_rejected_before_connect(self):
         for host, user in [("-invalid", USERNAME), ("name two", USERNAME), (HOST, "-invalid")]:

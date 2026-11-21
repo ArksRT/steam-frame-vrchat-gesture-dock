@@ -2,7 +2,7 @@
 
 install() takes host, username, password and two UI callbacks. confirm_host_key
 receives (host, algorithm, SHA256 fingerprint); progress receives a status line.
-The installed executable's path is returned after the remote tunnel is verified.
+The installed executable's path is returned after SteamVR startup registration.
 """
 
 import base64
@@ -21,8 +21,6 @@ import tempfile
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
-
-import paramiko
 
 
 def _directory():
@@ -128,6 +126,8 @@ def _known_keys(keygen, path, host):
 
 @contextmanager
 def _connect(host, username, password, keygen, pins, confirm_host_key):
+    import paramiko
+
     pinned, revoked = _known_keys(keygen, pins, host)
     known, system_revoked = _known_keys(keygen, Path.home() / ".ssh" / "known_hosts", host)
     trusted = pinned or known
@@ -214,6 +214,8 @@ fi
 
 
 def _deploy(remote, resources, public):
+    import paramiko
+
     stage = "/tmp/vrchat-gesture-dock." + secrets.token_hex(12)
     names = ("dashboard.js", "frame_dock.py", "install-frame.sh")
     with paramiko.SFTPClient.from_transport(remote) as sftp:
@@ -265,18 +267,20 @@ def _powershell(script, directory, exe):
     env = dict(os.environ, VRCHAT_DOCK_INSTALL=str(directory), VRCHAT_DOCK_EXE=str(exe))
     ps = Path(os.environ["SYSTEMROOT"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     encoded = base64.b64encode(("$ErrorActionPreference='Stop';\n" + script).encode("utf-16-le")).decode()
-    _run([ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], env=env)
+    return _run([ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], env=env).stdout.strip()
 
 
 _STOP = r"""
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $dir = $env:VRCHAT_DOCK_INSTALL
 $older = Join-Path $dir 'pc_bridge.py'
+$scriptArg = '(?:^|\s)"?' + [Regex]::Escape($older) + '"?(?:\s|$)'
 $program = (Join-Path $dir 'program') + '\'
 $workers = @(Get-CimInstance Win32_Process -Filter "Name = 'VRChatGestureDock.exe' OR Name LIKE 'pythonw%.exe'" |
   Where-Object {
     ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($program,[StringComparison]::OrdinalIgnoreCase) -and
      $_.CommandLine -match '(?:^|\s)--bridge(?:\s|$)') -or
-    ($_.Name -like 'pythonw*.exe' -and $_.CommandLine -and $_.CommandLine.Contains('"' + $older + '"'))
+    ($_.Name -like 'pythonw*.exe' -and $_.ExecutablePath -and $_.CommandLine -match $scriptArg)
   })
 $pids = @($workers | ForEach-Object { $_.ProcessId })
 $key = Join-Path $dir 'frame-tunnel-key'
@@ -286,42 +290,108 @@ $tunnels = @(Get-CimInstance Win32_Process -Filter "Name = 'ssh.exe'" | Where-Ob
 foreach ($p in @($workers) + @($tunnels)) {
   Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
 }
+if ($workers.Count -gt 0) {
+  $first = $workers[0]
+  @{executable=$first.ExecutablePath; script=($first.Name -like 'pythonw*.exe')} | ConvertTo-Json -Compress
+}
 """
 
-_REGISTER = r"""
-$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut(
-  (Join-Path ([Environment]::GetFolderPath('Startup')) 'VRChat Gesture Dock.lnk'))
-$shortcut.TargetPath = $env:VRCHAT_DOCK_EXE
-$shortcut.Arguments = '--bridge'
-$shortcut.WorkingDirectory = $env:VRCHAT_DOCK_INSTALL
-$shortcut.Save()
+_READ_LEGACY = r"""
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$path = Join-Path ([Environment]::GetFolderPath('Startup')) 'VRChat Gesture Dock.lnk'
+if (Test-Path -LiteralPath $path -PathType Leaf) {
+  $link = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
+  @{path=$path; target=$link.TargetPath; arguments=$link.Arguments} | ConvertTo-Json -Compress
+}
 """
 
 
-def _start(directory, exe):
+def _owns_shortcut(directory, target, arguments):
+    target = Path(target)
+    if re.fullmatch(r"pythonw[\d.]*\.exe", target.name, re.I):
+        return arguments in (str(directory / "pc_bridge.py"), '"' + str(directory / "pc_bridge.py") + '"')
+    return (target.name.lower() == "vrchatgesturedock.exe"
+            and target.parent.parent == directory / "program"
+            and re.fullmatch(r"[0-9a-f]{16}", target.parent.name, re.I) is not None
+            and arguments == "--bridge")
+
+
+def _remove_legacy(directory, exe):
+    raw = _powershell(_READ_LEGACY, directory, exe)
+    if raw:
+        link = json.loads(raw)
+        if _owns_shortcut(directory, link["target"], link["arguments"]):
+            Path(link["path"]).unlink(missing_ok=True)
+
+
+def _start(directory, exe, arguments):
     env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
-    return subprocess.Popen([exe, "--bridge"], cwd=directory, env=env, stdin=subprocess.DEVNULL,
+    return subprocess.Popen([exe, *arguments], cwd=directory, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS)
 
 
-def _wait_for_bridge(remote, process, instance):
+def _wait_for_bridge(remote, instance):
+    import paramiko
+    from pc_bridge import find_vrserver_pid
+
     probe = ("import http.client,json; h=http.client.HTTPConnection('127.0.0.1',27656,timeout=2);"
              "h.request('GET','/health'); print(json.load(h.getresponse())['instance_id'])")
     deadline = time.monotonic() + 35
     while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError("Windows 后台服务已退出。请检查本机 27656 端口及安装目录的 bridge.log。")
+        if not find_vrserver_pid():
+            return False
         try:
             if _remote_command(remote, "python3 -c " + shlex.quote(probe), timeout=5).strip() == instance:
-                return
+                return True
         except (OSError, RuntimeError, paramiko.SSHException):
             pass
         time.sleep(1)
     raise RuntimeError("头显尚未连通这台电脑的后台服务。请检查 SSH 转发权限，并确认其他电脑没有占用头显的 27656 端口。")
 
 
+def configure_startup(directory, executable, arguments, *, updated_files, verify=None):
+    """Migrate both the packaged app and the original Python installer."""
+    import steamvr_lifecycle
+    from pc_bridge import find_vrserver_pid
+
+    originals = {path: path.read_bytes() if path.is_file() else None for path in updated_files}
+    previous_worker = _powershell(_STOP, directory, executable)
+    undo = None
+    try:
+        for path, content in updated_files.items():
+            _atomic(path, content)
+        undo = steamvr_lifecycle.register(directory, executable, arguments)
+        if not steamvr_lifecycle.startup_enabled():
+            mode = "disabled"
+        elif not find_vrserver_pid():
+            mode = "waiting"
+        else:
+            _start(directory, executable, arguments)
+            mode = "running" if verify is None or verify() else "waiting"
+        _remove_legacy(directory, executable)
+        return mode
+    except Exception:
+        _powershell(_STOP, directory, executable)
+        try:
+            if undo is not None:
+                undo()
+        finally:
+            for path, original in originals.items():
+                if original is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _atomic(path, original)
+            if previous_worker:
+                worker = json.loads(previous_worker)
+                args = [str(directory / "pc_bridge.py")] if worker["script"] else ["--bridge"]
+                _start(directory, Path(worker["executable"]), args)
+        raise
+
+
 def install(host, username, password, confirm_host_key, progress):
+    import paramiko
+
     host, username = _address(host, username)
     if not password:
         raise ValueError("请输入 SteamOS 账户密码。")
@@ -337,29 +407,20 @@ def install(host, username, password, confirm_host_key, progress):
             progress("正在安装头显底栏按钮…")
             _preflight(remote)
             old = _config(settings)
-            prior_data = settings.read_bytes() if settings.is_file() else None
             exe = _stage_executable(directory, Path(sys.executable))
             _deploy(remote, Path(sys._MEIPASS), _public_key(directory, keygen))
             instance = old.get("instance_id") or secrets.token_hex(16)
             new = dict(host=host, username=username, instance_id=instance)
-            progress("正在启动电脑服务，检查头显的连接…")
-            _powershell(_STOP, directory, exe)
-            try:
-                _atomic(settings, json.dumps(new, ensure_ascii=False, indent=2).encode("utf-8"))
-                process = _start(directory, exe)
-                _wait_for_bridge(remote, process, instance)
-                _powershell(_REGISTER, directory, exe)
-            except Exception:
-                # The old shortcut is still present until verification succeeds.
-                _powershell(_STOP, directory, exe)
-                if prior_data is None:
-                    settings.unlink(missing_ok=True)
-                else:
-                    _atomic(settings, prior_data)
-                startup = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Startup/VRChat Gesture Dock.lnk"
-                if startup.is_file():
-                    os.startfile(startup)
-                raise
+            progress("正在注册 SteamVR 启动项…")
+            mode = configure_startup(directory, exe, ["--bridge"],
+                                     updated_files={settings: json.dumps(new, ensure_ascii=False, indent=2).encode("utf-8")},
+                                     verify=lambda: _wait_for_bridge(remote, instance))
+            if mode == "disabled":
+                progress("安装完成。已保留关闭状态。可在 SteamVR「设置 → 启动/关闭 → 选择启动时的叠加界面应用」中打开 VRChat Gesture Dock。")
+                return exe
+            if mode == "waiting":
+                progress("安装完成。下次启动 SteamVR 时将自动启动手势服务，并连接头显。")
+                return exe
             try:
                 status = _remote_command(remote, 'python3 "$HOME/.local/share/vrchat-gesture-dock/frame_dock.py" --status',
                                          timeout=6).strip()
@@ -370,3 +431,11 @@ def install(host, username, password, confirm_host_key, progress):
             else:
                 progress("安装完成，电脑与头显已连通。请开启 CEF 远程调试并打开 Dashboard，等待「手势」按钮出现。")
             return exe
+
+
+if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] == "--script-startup":
+    folder = Path(sys.argv[2]).resolve()
+    scripts = ("pc_bridge.py", "pc_binding_api.py", "gesture_bindings.py", "steamvr_lifecycle.py")
+    with _setup_lock(folder):
+        updated = {folder / name: Path(__file__).with_name(name).read_bytes() for name in scripts}
+        print(configure_startup(folder, Path(sys.argv[3]), [str(folder / "pc_bridge.py")], updated_files=updated))

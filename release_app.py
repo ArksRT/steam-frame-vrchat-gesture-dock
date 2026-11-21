@@ -49,7 +49,7 @@ def run_installer(smoke_test=False):
         entry.grid(row=row, column=1, sticky="ew", pady=5)
         entries.append(entry)
 
-    status = tk.StringVar(value="准备安装")
+    status = tk.StringVar(value="安装后可在 SteamVR 的「启动/关闭」设置中开关电脑端手势服务。")
     progress_bar = ttk.Progressbar(page, mode="indeterminate")
     progress_bar.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(16, 10))
     status_label = ttk.Label(page, textvariable=status, wraplength=460, justify="left")
