@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlencode, urlsplit
 
 from gesture_bindings import make_quest_binding
+from dock_i18n import tr
 
 
 APP = "steam.app.438100"
@@ -70,10 +71,10 @@ class BindingManager:
                                         "Referer": origin + "/dashboard/controllerbinding.html"})
             response = connection.getresponse()
             if not 200 <= response.status < 300:
-                raise BindingError(f"SteamVR 绑定接口返回 HTTP {response.status}。")
+                raise BindingError(tr("The SteamVR bindings API returned HTTP {code}.", code=response.status))
             raw = response.read().strip()
         except (OSError, HTTPException) as error:
-            raise BindingError("请先连接 Frame，并启动运行 VRChat 的 SteamVR。") from error
+            raise BindingError(tr("Connect the Frame and start SteamVR on the PC that runs VRChat.")) from error
         finally:
             connection.close()
         # Valve's editor treats this HTTP reply as an acknowledgement and waits
@@ -83,11 +84,11 @@ class BindingManager:
         except (ValueError, UnicodeDecodeError):
             if body is not None:
                 return {}
-            raise BindingError("SteamVR 返回了无法识别的绑定数据。")
+            raise BindingError(tr("SteamVR returned unrecognized binding data."))
         if not isinstance(data, dict):
-            raise BindingError("SteamVR 返回了无法识别的绑定数据。")
+            raise BindingError(tr("SteamVR returned unrecognized binding data."))
         if data.get("error") or data.get("success") is False:
-            raise BindingError(str(data.get("error") or "SteamVR 未接受绑定请求。"))
+            raise BindingError(str(data.get("error") or tr("SteamVR rejected the binding request.")))
         return data
 
     def _current_url(self):
@@ -95,7 +96,7 @@ class BindingManager:
         selection = manifest.get("current_binding_url") or {}
         url = selection.get(CONTROLLER)
         if not isinstance(url, str) or not url:
-            raise BindingError("请连接 Frame 手柄并运行一次 SteamVR 版 VRChat。")
+            raise BindingError(tr("Connect the Frame controllers and run VRChat through SteamVR at least once."))
         return url
 
     def _load(self, url):
@@ -104,7 +105,7 @@ class BindingManager:
         })
         binding = result.get("binding_config")
         if not isinstance(binding, dict) or not isinstance(binding.get("bindings"), dict):
-            raise BindingError("SteamVR 无法读取这套 VRChat 手柄绑定。")
+            raise BindingError(tr("SteamVR could not read this VRChat controller binding."))
         return binding
 
     def _record(self):
@@ -115,7 +116,7 @@ class BindingManager:
         if not isinstance(record, dict) or not all(
             isinstance(record.get(key), str) and record[key] for key in ("original", "quest")
         ):
-            raise BindingError("无法读取已保存的原绑定记录。")
+            raise BindingError(tr("Could not read the saved original binding."))
         return record
 
     def _select(self, url):
@@ -127,7 +128,7 @@ class BindingManager:
             if _same_url(self._current_url(), url):
                 return
             if time.monotonic() >= deadline:
-                raise BindingError("SteamVR 尚未确认切换，请检查当前绑定。")
+                raise BindingError(tr("SteamVR has not confirmed the switch. Check the current binding."))
             time.sleep(0.18)
 
     def _prepare_quest(self, original):
@@ -150,7 +151,7 @@ class BindingManager:
                 quest = bool(record and _same_url(current, record["quest"]))
                 mode = "quest" if quest else "frame"
                 if change and expected_mode is not None and expected_mode != mode:
-                    return {"mode": mode, "detail": "绑定状态已经改变，请按当前状态重试。"}
+                    return {"mode": mode, "detail": tr("The binding changed. Try again using the current mode.")}
                 if change:
                     if quest:
                         self._load(record["original"])

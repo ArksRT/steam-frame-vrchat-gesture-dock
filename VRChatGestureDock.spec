@@ -53,14 +53,14 @@ analysis = Analysis(
 )
 archive = PYZ(analysis.pure)
 version = VSVersionInfo(
-    ffi=FixedFileInfo(filevers=(1, 1, 0, 0), prodvers=(1, 1, 0, 0),
+    ffi=FixedFileInfo(filevers=(1, 2, 0, 0), prodvers=(1, 2, 0, 0),
                       mask=0x3f, flags=0, OS=0x40004, fileType=1, subtype=0, date=(0, 0)),
     kids=[StringFileInfo([StringTable("040904B0", [
         StringStruct("FileDescription", "VRChat Gesture Dock for Steam Frame"),
-        StringStruct("FileVersion", "1.1.0"),
+        StringStruct("FileVersion", "1.2.0"),
         StringStruct("OriginalFilename", "VRChatGestureDock.exe"),
         StringStruct("ProductName", "VRChat Gesture Dock"),
-        StringStruct("ProductVersion", "1.1.0"),
+        StringStruct("ProductVersion", "1.2.0"),
     ])]), VarFileInfo([VarStruct("Translation", [1033, 1200])])],
 )
 exe = EXE(archive, analysis.scripts, analysis.binaries, analysis.datas, [],

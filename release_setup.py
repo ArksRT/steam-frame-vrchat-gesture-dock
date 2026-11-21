@@ -22,6 +22,8 @@ import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
+from dock_i18n import language_context, saved_language, tr
+
 
 def _directory():
     return Path(os.environ["LOCALAPPDATA"]) / "VRChatGestureDock"
@@ -32,7 +34,7 @@ def _config(path):
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("无法读取电脑上的连接配置。")
+        raise ValueError(tr("Could not read the connection settings on this PC."))
     return data
 
 
@@ -53,10 +55,10 @@ def _address(host, username):
     except ValueError:
         if (len(host) > 253 or not all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
                                       for label in host.rstrip(".").split("."))):
-            raise ValueError("请输入 Steam Frame 的主机名或 IP 地址。") from None
+            raise ValueError(tr("Enter the Steam Frame hostname or IP address.")) from None
         host = host.rstrip(".").lower()
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}", username):
-        raise ValueError("请输入有效的 SteamOS 用户名，例如 steamos。")
+        raise ValueError(tr("Enter a valid SteamOS username, such as steamos."))
     return host, username
 
 
@@ -69,7 +71,7 @@ def _run(command, *, env=None, check=True, timeout=25):
 def _keygen():
     folder = Path(os.environ["SYSTEMROOT"]) / "System32" / "OpenSSH"
     if not all((folder / name).is_file() for name in ("ssh.exe", "ssh-keygen.exe")):
-        raise RuntimeError("请在 Windows 的「可选功能」中安装 OpenSSH 客户端，再运行安装程序。")
+        raise RuntimeError(tr("Install OpenSSH Client in Windows Optional Features, then run the installer again."))
     return folder / "ssh-keygen.exe"
 
 
@@ -91,7 +93,7 @@ def _setup_lock(directory):
         try:
             msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError as exc:
-            raise RuntimeError("另一个安装窗口正在配置快捷按钮。请等待它完成。") from exc
+            raise RuntimeError(tr("Another installer is configuring Gesture Dock. Wait for it to finish.")) from exc
         try:
             yield
         finally:
@@ -104,7 +106,7 @@ def _known_keys(keygen, path, host):
         return [], []
     lookup = _run([keygen, "-F", host, "-f", path], check=False)
     if lookup.returncode not in (0, 1) or lookup.stderr.strip():
-        raise RuntimeError(f"无法核对 SSH 信任记录：{path}")
+        raise RuntimeError(tr("Could not check the SSH trust record in {path}.", path=path))
     acceptable, revoked = [], []
     for line in lookup.stdout.splitlines():
         if not line.strip() or line.startswith("#"):
@@ -114,12 +116,12 @@ def _known_keys(keygen, path, host):
         if parts[0].startswith("@"):
             marker = parts.pop(0)
             if marker == "@cert-authority":
-                raise RuntimeError("此设备配置了 SSH 主机证书验证。安装器目前支持固定主机公钥。")
+                raise RuntimeError(tr("This device uses SSH host certificates. The installer supports pinned host keys."))
             if marker != "@revoked":
-                raise RuntimeError("SSH 信任记录含有无法识别的标记。")
+                raise RuntimeError(tr("The SSH trust record contains an unrecognized marker."))
             target = revoked
         if len(parts) < 3:
-            raise RuntimeError("SSH 主机公钥记录格式异常。")
+            raise RuntimeError(tr("The SSH host key record has an invalid format."))
         target.append((parts[1], parts[2]))
     return acceptable, revoked
 
@@ -131,7 +133,11 @@ def _connect(host, username, password, keygen, pins, confirm_host_key):
     pinned, revoked = _known_keys(keygen, pins, host)
     known, system_revoked = _known_keys(keygen, Path.home() / ".ssh" / "known_hosts", host)
     trusted = pinned or known
-    with socket.create_connection((host, 22), timeout=8) as sock, paramiko.Transport(sock) as remote:
+    try:
+        connection = socket.create_connection((host, 22), timeout=8)
+    except OSError as exc:
+        raise RuntimeError(tr("Could not connect to {host} over SSH. Check the address, SSH setting and local network.", host=host)) from exc
+    with connection as sock, paramiko.Transport(sock) as remote:
         if trusted:
             algs = {algorithm for algorithm, _ in trusted}
             if "ssh-rsa" in algs:
@@ -139,22 +145,22 @@ def _connect(host, username, password, keygen, pins, confirm_host_key):
             options = remote.get_security_options()
             matches = tuple(a for a in options.key_types if a in algs)
             if not matches:
-                raise RuntimeError("保存的主机公钥类型不受支持。")
+                raise RuntimeError(tr("The saved SSH host key type is unsupported."))
             options.key_types = matches
         remote.banner_timeout = remote.auth_timeout = 12
         remote.start_client(timeout=12)
         key = remote.get_remote_server_key()
         identity = (key.get_name(), key.get_base64())
         if identity in revoked + system_revoked or (trusted and identity not in trusted):
-            raise RuntimeError("Steam Frame 的 SSH 主机公钥与信任记录不符或已被撤销。请先核对设备。")
+            raise RuntimeError(tr("The Steam Frame SSH host key has changed or was revoked. Verify the headset before reconnecting."))
         digest = hashlib.sha256(key.asbytes()).digest()
         fingerprint = "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
         if not trusted and not confirm_host_key(host, identity[0], fingerprint):
-            raise RuntimeError("已取消连接。")
+            raise RuntimeError(tr("Connection canceled."))
         try:
             remote.auth_password(username, password)
         except paramiko.AuthenticationException as exc:
-            raise RuntimeError("SSH 登录失败。请检查 SteamOS 用户名和密码。") from exc
+            raise RuntimeError(tr("SSH sign-in failed. Check the SteamOS username and password.")) from exc
         if identity not in pinned:
             old = pins.read_bytes() if pins.is_file() else b""
             entry = f"{host} {identity[0]} {identity[1]}\n".encode("ascii")
@@ -168,7 +174,7 @@ def _public_key(directory, keygen):
         _run([keygen, "-q", "-t", "ed25519", "-N", "", "-C", "vrchat-gesture-dock", "-f", key])
     public = _run([keygen, "-y", "-P", "", "-f", key]).stdout.split()
     if len(public) < 2 or public[0] != "ssh-ed25519":
-        raise RuntimeError("现有转发密钥不是有效的 Ed25519 密钥。")
+        raise RuntimeError(tr("The existing tunnel key is not a valid Ed25519 key."))
     text = f"ssh-ed25519 {public[1]} vrchat-gesture-dock\n".encode("ascii")
     _atomic(key.with_suffix(".pub"), text)
     return text
@@ -183,7 +189,7 @@ def _remote_command(remote, command, timeout=30):
         with channel.makefile("rb") as output:
             message = output.read(65536).decode("utf-8", "replace")
         if channel.recv_exit_status():
-            raise RuntimeError(message.strip()[-2000:] or "Steam Frame 未完成操作。")
+            raise RuntimeError(message.strip()[-2000:] or tr("The Steam Frame could not finish the operation."))
         return message
 
 
@@ -205,12 +211,12 @@ fi
 """
     status = _remote_command(remote, "sh -c " + shlex.quote(script)).strip()
     messages = {
-        "wrong_os": "目标设备不是运行 ARM64 SteamOS 的 Steam Frame。请核对设备地址。",
-        "python_missing": "头显缺少 Python 3 或 aiohttp。请先更新 SteamOS，或为系统 Python 安装 aiohttp。",
-        "systemd_unavailable": "无法访问 SteamOS 的用户服务。请用头显当前登录的 SteamOS 用户连接。",
+        "wrong_os": tr("Check the address. The target must be a Steam Frame running ARM64 SteamOS."),
+        "python_missing": tr("The headset needs Python 3 with aiohttp. Update SteamOS or install aiohttp for its system Python."),
+        "systemd_unavailable": tr("Could not reach SteamOS user services. Connect as the SteamOS user signed in on the headset."),
     }
     if status != "ready":
-        raise RuntimeError(messages.get(status, "无法确认 Steam Frame 的运行环境。"))
+        raise RuntimeError(messages.get(status, tr("Could not verify the Steam Frame environment.")))
 
 
 def _deploy(remote, resources, public):
@@ -347,7 +353,7 @@ def _wait_for_bridge(remote, instance):
         except (OSError, RuntimeError, paramiko.SSHException):
             pass
         time.sleep(1)
-    raise RuntimeError("头显尚未连通这台电脑的后台服务。请检查 SSH 转发权限，并确认其他电脑没有占用头显的 27656 端口。")
+    raise RuntimeError(tr("The headset could not reach the service on this PC. Check SSH port forwarding and make sure port 27656 on the headset is free."))
 
 
 def configure_startup(directory, executable, arguments, *, updated_files, verify=None):
@@ -389,37 +395,44 @@ def configure_startup(directory, executable, arguments, *, updated_files, verify
         raise
 
 
-def install(host, username, password, confirm_host_key, progress):
+def install(host, username, password, confirm_host_key, progress, *, language=None):
+    # Source callers from the Chinese-only releases do not pass a language.
+    selected = language if language is not None else (saved_language() or "zh-CN")
+    with language_context(selected):
+        return _install(host, username, password, confirm_host_key, progress, selected)
+
+
+def _install(host, username, password, confirm_host_key, progress, language):
     import paramiko
 
     host, username = _address(host, username)
     if not password:
-        raise ValueError("请输入 SteamOS 账户密码。")
+        raise ValueError(tr("Enter the SteamOS account password."))
     keygen = _keygen()
     if not getattr(sys, "frozen", False):
-        raise RuntimeError("请从已打包的 Windows 程序安装。")
+        raise RuntimeError(tr("Run the packaged Windows installer."))
     directory = _directory()
     directory.mkdir(parents=True, exist_ok=True)
     settings = directory / "connection.json"
     with _setup_lock(directory):
-        progress("正在核对设备身份并登录 Steam Frame…")
+        progress(tr("Checking the headset identity and signing in to Steam Frame…"))
         with _connect(host, username, password, keygen, directory / "frame-known-hosts", confirm_host_key) as remote:
-            progress("正在安装头显底栏按钮…")
+            progress(tr("Installing the Dashboard button on the headset…"))
             _preflight(remote)
             old = _config(settings)
             exe = _stage_executable(directory, Path(sys.executable))
             _deploy(remote, Path(sys._MEIPASS), _public_key(directory, keygen))
             instance = old.get("instance_id") or secrets.token_hex(16)
-            new = dict(host=host, username=username, instance_id=instance)
-            progress("正在注册 SteamVR 启动项…")
+            new = dict(host=host, username=username, instance_id=instance, language=language)
+            progress(tr("Registering the SteamVR startup app…"))
             mode = configure_startup(directory, exe, ["--bridge"],
                                      updated_files={settings: json.dumps(new, ensure_ascii=False, indent=2).encode("utf-8")},
                                      verify=lambda: _wait_for_bridge(remote, instance))
             if mode == "disabled":
-                progress("安装完成。已保留关闭状态。可在 SteamVR「设置 → 启动/关闭 → 选择启动时的叠加界面应用」中打开 VRChat Gesture Dock。")
+                progress(tr("Installation complete. Startup remains off. To enable it, open SteamVR Settings → Startup / Shutdown → Choose Startup Overlay Apps and turn on VRChat Gesture Dock."))
                 return exe
             if mode == "waiting":
-                progress("安装完成。下次启动 SteamVR 时将自动启动手势服务，并连接头显。")
+                progress(tr("Installation complete. The gesture service will connect to your headset the next time SteamVR starts."))
                 return exe
             try:
                 status = _remote_command(remote, 'python3 "$HOME/.local/share/vrchat-gesture-dock/frame_dock.py" --status',
@@ -427,15 +440,15 @@ def install(host, username, password, confirm_host_key, progress):
             except (OSError, RuntimeError, paramiko.SSHException, EOFError):
                 status = "waiting"
             if status == "mounted":
-                progress("安装完成。头显底栏已显示「手势」，串流 VRChat 时点击即可切换。")
+                progress(tr("Installation complete. Click Gestures in the headset Dashboard to switch modes while streaming VRChat."))
             else:
-                progress("安装完成，电脑与头显已连通。请开启 CEF 远程调试并打开 Dashboard，等待「手势」按钮出现。")
+                progress(tr("Installation complete. The headset is connected to this PC. Enable CEF Remote Debugging and open the Dashboard to see the Gestures button."))
             return exe
 
 
 if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] == "--script-startup":
     folder = Path(sys.argv[2]).resolve()
-    scripts = ("pc_bridge.py", "pc_binding_api.py", "gesture_bindings.py", "steamvr_lifecycle.py")
+    scripts = ("pc_bridge.py", "pc_binding_api.py", "gesture_bindings.py", "steamvr_lifecycle.py", "dock_i18n.py")
     with _setup_lock(folder):
         updated = {folder / name: Path(__file__).with_name(name).read_bytes() for name in scripts}
         print(configure_startup(folder, Path(sys.argv[3]), [str(folder / "pc_bridge.py")], updated_files=updated))

@@ -181,6 +181,15 @@ class InstallTests(unittest.TestCase):
         self.verify.assert_not_called()
         self.assertIn("下次启动 SteamVR", self.messages[-1])
 
+    def test_english_install_persists_language_and_reports_english_progress(self):
+        self.runtime.return_value = None
+        setup.install(HOST, USERNAME, PASSWORD, confirm_host_key=self.fail,
+                      progress=self.messages.append, language="en")
+        self.assertIn("next time SteamVR starts", self.messages[-1])
+        self.assertTrue(all(message.isascii() or message.replace("…", "").isascii()
+                            for message in self.messages))
+        self.assertEqual(json.loads(self.config.read_text(encoding="utf-8"))["language"], "en")
+
     def test_disabled_startup_setting_survives_upgrade_even_if_runtime_is_open(self):
         self.lifecycle.startup_enabled.return_value = False
         self.install()

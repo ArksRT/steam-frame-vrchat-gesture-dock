@@ -1,5 +1,5 @@
 (() => {
-  const version = 1;
+  const version = 2;
   const previous = window.__vrchatGestureToggle;
   if (previous?.version === version) return "already installed";
   // frame_dock.py checks the CEF target URL. Steam sets a different document
@@ -7,6 +7,37 @@
   previous?.dispose();
 
   const api = "http://127.0.0.1:27656";
+  const languageKey = "vrchatGestureDock.language";
+  const copy = {
+    en: {
+      label: "Gestures", unavailable: "Not ready", switching: "Switching", title: "VRChat gestures",
+      connecting: "Connecting to the gesture service on your PC.",
+      check: "Check that SteamVR and VRChat Gesture Dock are running on your streaming PC.",
+      retry: "Could not switch gestures. Check the connection and try again.",
+      describe: (current, next) => `VRChat gestures · Using ${current}. Click to switch to ${next}.`
+    },
+    "zh-CN": {
+      label: "手势", unavailable: "未就绪", switching: "切换中", title: "VRChat 手势",
+      connecting: "正在连接电脑上的 VRChat 手势服务。",
+      check: "请确认串流电脑上的 SteamVR 和 VRChat Gesture Dock 正在运行。",
+      retry: "手势切换失败，请检查连接后重试。",
+      describe: (current, next) => `VRChat 手势 · 当前 ${current}，点击切换到 ${next}。`
+    }
+  };
+
+  function validLanguage(value) {
+    return value === "en" || value === "zh-CN";
+  }
+
+  function headsetLanguage() {
+    const steam = new URL(document.baseURI).searchParams.get("LANGUAGE");
+    const locale = steam || document.documentElement.lang || navigator.language;
+    return /^(?:schinese$|tchinese$|zh(?:[-_]|$))/i.test(locale) ? "zh-CN" : "en";
+  }
+
+  let savedLanguage;
+  try { savedLanguage = localStorage.getItem(languageKey); } catch { /* Storage may be disabled in CEF. */ }
+  let language = validLanguage(savedLanguage) ? savedLanguage : headsetLanguage();
   const style = document.createElement("style");
   style.textContent = `
     #vrchat-gesture-toggle {
@@ -18,6 +49,8 @@
     }
     #vrchat-gesture-toggle .vrchat-gesture-label { font-size: .76em; }
     #vrchat-gesture-toggle .vrchat-gesture-mode { font-size: .82em; font-weight: 700; }
+    #vrchat-gesture-toggle:lang(en) { min-width: 64px; }
+    #vrchat-gesture-toggle:lang(en) span { font-size: min(.8em, 13px); }
     #vrchat-gesture-toggle[data-mode="quest"] .vrchat-gesture-mode { color: #86d8ff; }
     #vrchat-gesture-toggle[data-mode="unavailable"] .vrchat-gesture-mode { opacity: .75; }
     #vrchat-gesture-toggle:hover, #vrchat-gesture-toggle:focus-visible {
@@ -31,7 +64,6 @@
   button.id = "vrchat-gesture-toggle";
   const label = document.createElement("span");
   label.className = "vrchat-gesture-label";
-  label.textContent = "手势";
   const indicator = document.createElement("span");
   indicator.className = "vrchat-gesture-mode";
   indicator.setAttribute("aria-live", "polite");
@@ -40,23 +72,27 @@
   let anchor;
   let slot;
   let mode = "unavailable";
-  let detail = "正在连接电脑上的 VRChat 手势服务";
+  let detail;
+  let reason = "connecting";
   let checking;
   let switching;
   let disposed = false;
 
   function draw() {
-    const names = { frame: "Frame", quest: "Quest", unavailable: "未就绪" };
+    const text = copy[language];
+    const names = { frame: "Frame", quest: "Quest", unavailable: text.unavailable };
     const next = mode === "quest" ? "Frame" : "Quest";
-    const caption = switching ? "切换中" : names[mode];
+    const caption = switching ? text.switching : names[mode];
+    button.lang = language;
+    if (label.textContent !== text.label) label.textContent = text.label;
     button.dataset.mode = mode;
     button.setAttribute("aria-busy", String(Boolean(switching)));
     if (mode === "unavailable") button.removeAttribute("aria-pressed");
     else button.setAttribute("aria-pressed", String(mode === "quest"));
     if (indicator.textContent !== caption) indicator.textContent = caption;
     button.title = mode === "unavailable"
-      ? "VRChat 手势 · " + detail
-      : "VRChat 手势 · 当前 " + names[mode] + "，点击切换到 " + next;
+      ? text.title + " · " + (detail || text[reason])
+      : switching ? text.title + " · " + text.switching : text.describe(names[mode], next);
     button.setAttribute("aria-label", button.title);
   }
 
@@ -105,17 +141,27 @@
         cache: "no-store", credentials: "omit", signal: controller.signal, ...options
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || data.error || "手势服务响应异常");
-      if (!["frame", "quest", "unavailable"].includes(data.mode)) throw new Error("无法读取绑定状态");
+      if (!response.ok || !["frame", "quest", "unavailable"].includes(data.mode)) {
+        throw new Error("Invalid gesture service response");
+      }
       return data;
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  function update(state) {
+  function update(state, fallbackReason = "check") {
+    if (validLanguage(state.language)) {
+      language = state.language;
+      if (language !== savedLanguage) {
+        savedLanguage = language;
+        try { localStorage.setItem(languageKey, language); } catch { /* The in-memory choice still applies. */ }
+      }
+    }
     mode = state.mode;
-    detail = state.detail || "请确认串流电脑上的 SteamVR 已启动";
+    reason = fallbackReason;
+    // Older bridges only return Chinese diagnostics and omit the language field.
+    detail = (validLanguage(state.language) || language === "zh-CN") ? state.detail : undefined;
   }
 
   async function refresh() {
@@ -146,12 +192,13 @@
     switching = new AbortController();
     draw();
     try {
-      update(await request("/toggle", switching, {
+      const result = await request("/toggle", switching, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ expectedMode: mode })
-      }));
-    } catch (error) {
-      update({ mode: "unavailable", detail: error.message || "切换失败，请重试" });
+      });
+      if (!disposed) update(result);
+    } catch {
+      if (!disposed) update({ mode: "unavailable" }, "retry");
     } finally {
       switching = undefined;
       if (!disposed) draw();

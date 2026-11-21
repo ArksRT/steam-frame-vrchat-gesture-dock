@@ -14,6 +14,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import url2pathname
 
+from dock_i18n import save_language
 from pc_binding_api import APP, CONTROLLER, BindingManager
 import pc_bridge
 from pc_bridge import Handler, ORIGIN, PORT
@@ -79,6 +80,8 @@ class BridgeReleaseTest(unittest.TestCase):
                     {"output": "/actions/global/in/skeletonLeftHand"}]}}}
             bridge = serve(Handler)
             bridge.instance_id = "test-instance"
+            bridge.preferences_directory = directory.parent
+            save_language("en", directory.parent)
             bridge.manager = BindingManager(directory, runtime.server_port)
 
             def request(method, path, expected=None, origin=ORIGIN):
@@ -94,14 +97,27 @@ class BridgeReleaseTest(unittest.TestCase):
 
             self.assertEqual(request("GET", "/health")[1]["instance_id"], "test-instance")
             self.assertEqual(request("POST", "/toggle", origin="https://example.invalid")[0], 403)
-            self.assertEqual(request("POST", "/toggle", "frame"), (200, {"mode": "quest"}))
+            self.assertEqual(request("POST", "/toggle", "frame"), (200, {"mode": "quest", "language": "en"}))
             self.assertTrue(runtime.selection.startswith("file:"))
             bridge.manager = BindingManager(directory, runtime.server_port)
-            self.assertEqual(request("GET", "/state")[1], {"mode": "quest"})
+            self.assertEqual(request("GET", "/state")[1], {"mode": "quest", "language": "en"})
+            save_language("zh-CN", directory.parent)
+            self.assertEqual(request("GET", "/state")[1], {"mode": "quest", "language": "zh-CN"})
             self.assertEqual(request("POST", "/toggle", "frame")[1]["mode"], "quest")
-            self.assertEqual(request("POST", "/toggle", "quest")[1], {"mode": "frame"})
+            self.assertEqual(request("POST", "/toggle", "quest")[1], {"mode": "frame", "language": "zh-CN"})
             self.assertEqual(runtime.original, runtime.selection)
             self.assertEqual(len(runtime.changes), 2)
+
+            # Simulate a headset that has never selected a VRChat binding.
+            runtime.selection = ""
+            unavailable = request("GET", "/state")[1]
+            self.assertEqual((unavailable["mode"], unavailable["language"]), ("unavailable", "zh-CN"))
+            self.assertIn("手柄", unavailable["detail"])
+            save_language("en", directory.parent)
+            unavailable = request("GET", "/state")[1]
+            self.assertEqual((unavailable["mode"], unavailable["language"]), ("unavailable", "en"))
+            self.assertIn("VRChat", unavailable["detail"])
+            self.assertTrue(unavailable["detail"].isascii())
 
 
 @unittest.skipUnless(os.name == "nt", "SteamVR bridge lifecycle is Windows-specific")

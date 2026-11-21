@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from dock_i18n import language_context, preferred_language
 from pc_binding_api import BindingManager
 
 
@@ -57,6 +58,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self._reply(204 if self._permitted() and self.path in ("/toggle", "/state") else 403)
 
+    def _binding_result(self, action, *args):
+        language = preferred_language(self.server.preferences_directory)
+        with language_context(language):
+            return {**action(*args), "language": language}
+
     def do_GET(self):
         if not self._permitted():
             return self._reply(403)
@@ -65,7 +71,7 @@ class Handler(BaseHTTPRequestHandler):
                                      "instance_id": self.server.instance_id})
         if self.path != "/state":
             return self._reply(404)
-        self._reply(200, self.server.manager.state())
+        self._reply(200, self._binding_result(self.server.manager.state))
 
     def do_POST(self):
         if not self._permitted():
@@ -84,7 +90,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._reply(400)
         except (ValueError, TypeError):
             return self._reply(400)
-        result = self.server.manager.toggle(expected)
+        result = self._binding_result(self.server.manager.toggle, expected)
         logging.info("Mode request from %s: %s", expected, result)
         self._reply(200, result)
 
@@ -259,6 +265,7 @@ def _serve_runtime(directory, runtime):
         return
     with server:
         server.manager = BindingManager(directory / "bindings")
+        server.preferences_directory = directory
         config = directory / "connection.json"
         server.instance_id = json.loads(config.read_text(encoding="utf-8")).get("instance_id") if config.exists() else None
         stop = threading.Event()

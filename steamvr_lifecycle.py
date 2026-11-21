@@ -8,6 +8,8 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+from dock_i18n import tr
+
 
 APP_KEY = "com.dhrthunder.vrchat-gesture-dock"
 MANIFEST = "gesture-dock.vrmanifest"
@@ -18,7 +20,7 @@ def _read_json(path):
         return {}
     value = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(value, dict):
-        raise ValueError(f"SteamVR 配置格式异常：{path}")
+        raise ValueError(tr("The SteamVR configuration file has an invalid format: {path}", path=path))
     return value
 
 
@@ -50,10 +52,10 @@ def _paths():
     runtime = os.environ.get("VR_OVERRIDE") or next(iter(data.get("runtime", [])), None)
     config = os.environ.get("VR_CONFIG_PATH") or next(iter(data.get("config", [])), None)
     if not runtime or not config:
-        raise RuntimeError("请先在这台电脑上运行一次 SteamVR，以建立 OpenVR 路径配置。")
+        raise RuntimeError(tr("Run SteamVR once on this PC to create its OpenVR path settings."))
     dll = Path(runtime) / "bin/win64/openvr_api.dll"
     if not dll.is_file():
-        raise RuntimeError(f"找不到 SteamVR 的 Windows x64 OpenVR 库：{dll}")
+        raise RuntimeError(tr("Could not find the SteamVR Windows x64 OpenVR library at {path}.", path=dll))
     return dll, Path(config)
 
 
@@ -76,7 +78,7 @@ class _Apps:
         error = ctypes.c_int()
         value = self.get_bool(APP_KEY.encode(), prop, ctypes.byref(error))
         if error.value:
-            raise RuntimeError(f"SteamVR 无法读取应用属性 {prop}（{error.value}）。")
+            raise RuntimeError(tr("SteamVR could not read application property {prop} (error {code}).", prop=prop, code=error.value))
         return bool(value)
 
 
@@ -92,13 +94,13 @@ def _applications(dll_path):
         yield None
         return
     if error.value:
-        raise RuntimeError(f"SteamVR 暂时无法连接（OpenVR {error.value}）。请在启停完成后重试。")
+        raise RuntimeError(tr("SteamVR is unavailable (OpenVR error {code}). Wait for startup or shutdown to finish and try again.", code=error.value))
     try:
         dll.VR_GetGenericInterface.argtypes = (ctypes.c_char_p, ctypes.POINTER(ctypes.c_int))
         dll.VR_GetGenericInterface.restype = ctypes.POINTER(ctypes.c_void_p)
         table = dll.VR_GetGenericInterface(b"FnTable:IVRApplications_008", ctypes.byref(error))
         if error.value or not table:
-            raise RuntimeError(f"无法打开 SteamVR 的启动应用接口（OpenVR {error.value}）。")
+            raise RuntimeError(tr("Could not open the SteamVR startup application interface (OpenVR error {code}).", code=error.value))
         yield _Apps(table)
     finally:
         dll.VR_ShutdownInternal()
@@ -134,7 +136,7 @@ def _offline(config, manifest, registered, enabled):
     data = _read_json(index)
     paths = data.get("manifest_paths", [])
     if not isinstance(paths, list):
-        raise ValueError("SteamVR 的 manifest_paths 配置格式异常。")
+        raise ValueError(tr("The SteamVR manifest_paths setting has an invalid format."))
     prefs_path = _preferences(config)
     prefs = _read_json(prefs_path)
     if enabled is not None and prefs.get("autolaunch") is not enabled:
@@ -154,22 +156,22 @@ def _offline(config, manifest, registered, enabled):
 
 def _checked(result, operation):
     if result:
-        raise RuntimeError(f"SteamVR {operation}失败（应用错误 {result}）。")
+        raise RuntimeError(tr("SteamVR could not {operation} (application error {code}).", operation=operation, code=result))
 
 
 def _sync_live(apps, path, registered, enabled):
     key = APP_KEY.encode()
     if not registered:
         if apps.installed(key):
-            _checked(apps.remove(path), "移除旧清单")
+            _checked(apps.remove(path), tr("remove the old manifest"))
         return
     if not apps.installed(key):
-        _checked(apps.add(path, False), "注册启动应用")
+        _checked(apps.add(path, False), tr("register the startup app"))
     if bool(apps.get_startup(key)) != bool(enabled):
-        _checked(apps.set_startup(key, bool(enabled)), "设置自动启动")
+        _checked(apps.set_startup(key, bool(enabled)), tr("set automatic startup"))
     if (not apps.installed(key) or bool(apps.get_startup(key)) != bool(enabled)
             or not apps.property(60) or apps.property(63) or apps.property(65)):
-        raise RuntimeError("SteamVR 未确认启动列表中的 VRChat Gesture Dock。")
+        raise RuntimeError(tr("SteamVR did not confirm VRChat Gesture Dock in its startup list."))
 
 
 def _apply(dll, config, manifest, content, registered, enabled):
@@ -178,7 +180,7 @@ def _apply(dll, config, manifest, content, registered, enabled):
     old = manifest.read_bytes() if manifest.exists() else None
     with _applications(dll) as apps:
         if apps and apps.installed(key) and old != content and registered:
-            _checked(apps.remove(path), "移除旧清单")
+            _checked(apps.remove(path), tr("remove the old manifest"))
         if content is not None and old != content:
             _write(manifest, content)
         if apps is None:
@@ -193,7 +195,7 @@ def _apply(dll, config, manifest, content, registered, enabled):
         with _applications(dll) as now_running:
             if now_running is not None:
                 if now_running.installed(key) and old != content and registered:
-                    _checked(now_running.remove(path), "重新加载清单")
+                    _checked(now_running.remove(path), tr("reload the manifest"))
                 _sync_live(now_running, path, registered, enabled)
 
 
@@ -215,7 +217,7 @@ def register(directory: Path, executable: Path, arguments):
             existing = bool(apps.installed(APP_KEY.encode()))
             old_enabled = bool(apps.get_startup(APP_KEY.encode())) if existing else saved_pref
     if existing and old is None:
-        raise RuntimeError("已有其他清单注册了此 SteamVR 应用，请检查现有安装。")
+        raise RuntimeError(tr("Another manifest has already registered this SteamVR app. Check the existing installation."))
 
     def rollback():
         _apply(dll, config, manifest, old, existing, old_enabled)

@@ -2,6 +2,8 @@
 
 from copy import deepcopy
 
+from dock_i18n import tr
+
 
 _VRCHAT_KEYS = {"steam.app.438100", "application.generated.unity.vrchat.exe"}
 _GESTURE_SETS = {"/actions/global", "/actions/action_menu", "/actions/one_hand"}
@@ -54,14 +56,14 @@ def make_quest_binding(current: dict) -> dict:
     """
     controller = current.get("controller_type")
     if controller not in {"frame_controller", "oculus_touch"}:
-        raise ValueError(f"Unsupported SteamVR controller type: {controller!r}")
+        raise ValueError(tr("Unsupported SteamVR controller type: {controller!r}", controller=controller))
     if current.get("app_key") not in _VRCHAT_KEYS:
-        raise ValueError("The current SteamVR binding does not identify VRChat")
+        raise ValueError(tr("The current SteamVR binding does not identify VRChat."))
 
     preset = deepcopy(current)
     sets = preset.get("bindings", {})
     if "/actions/global" not in {name.lower() for name in sets}:
-        raise ValueError("VRChat's global action set is missing")
+        raise ValueError(tr("The global VRChat action set is missing."))
     for set_name, group in sets.items():
         if "skeleton" in group:
             group["skeleton"] = [entry for entry in group["skeleton"]
