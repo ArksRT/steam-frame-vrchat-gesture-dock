@@ -4,7 +4,7 @@
 
 ## 下载与安装
 
-**[下载 Windows x64 安装程序（VRChatGestureDock.exe）](https://github.com/DHRThunder/steam-frame-vrchat-gesture-dock/releases/latest/download/VRChatGestureDock.exe)** · [所有版本](https://github.com/DHRThunder/steam-frame-vrchat-gesture-dock/releases)
+**[下载 Windows x64 安装程序（VRChatGestureDock.exe）](https://github.com/ArksRT/steam-frame-vrchat-gesture-dock/releases/latest/download/VRChatGestureDock.exe)** · [所有版本](https://github.com/ArksRT/steam-frame-vrchat-gesture-dock/releases)
 
 中文单文件安装程序适用于 Windows 10/11 x64，已包含 Python。请在平时用来串流 VRChat 的电脑上运行。
 
